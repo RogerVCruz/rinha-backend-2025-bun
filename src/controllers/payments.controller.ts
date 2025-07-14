@@ -1,23 +1,7 @@
-import { Elysia, t } from 'elysia';
-import sql from '../db';
+import * as paymentsRepository from '../repositories/payments.repository';
 
 export const getPaymentsSummary = async ({ query }: { query: { from?: string; to?: string } }) => {
-  const { from, to } = query;
-
-  let filter = sql``;
-  if (from && to) {
-    filter = sql`WHERE processed_at BETWEEN ${from} AND ${to}`;
-  }
-
-  const result = await sql`
-      SELECT
-        processor,
-        COUNT(*) AS total_requests,
-        SUM(amount) AS total_amount
-      FROM transactions
-      ${filter}
-      GROUP BY processor;
-    `;
+  const result = await paymentsRepository.getSummary(query.from, query.to);
 
   const summary = {
     default: {
@@ -44,7 +28,7 @@ export const getPaymentsSummary = async ({ query }: { query: { from?: string; to
 };
 
 export const createPayment = async ({ body }: { body: { correlationId: string; amount: number } }) => {
-  const health = await sql`SELECT * FROM processor_health`;
+  const health = await paymentsRepository.getHealthStatus();
   const defaultHealth = health.find(h => h.processor_name === 'default');
   const fallbackHealth = health.find(h => h.processor_name === 'fallback');
 
@@ -63,53 +47,33 @@ export const createPayment = async ({ body }: { body: { correlationId: string; a
   try {
     const response = await fetch(`http://payment-processor-${processor}:8080/payments`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        ...body,
-        requestedAt: new Date().toISOString(),
-      }),
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...body, requestedAt: new Date().toISOString() }),
     });
 
     if (response.ok) {
-      await sql`
-          INSERT INTO transactions (correlation_id, amount, processor, processed_at)
-          VALUES (${body.correlationId}, ${body.amount}, ${processor}, NOW());
-        `;
+      await paymentsRepository.createTransaction(body.correlationId, body.amount, processor);
       return { message: "Payment processed successfully" };
-    } else {
-      // Se o processador escolhido falhar, tenta o outro se estiver disponível
-      let nextProcessor: 'default' | 'fallback' | null = null;
-      if (processor === 'default' && fallbackHealth && !fallbackHealth.is_failing) {
-        nextProcessor = 'fallback';
-      } else if (processor === 'fallback' && defaultHealth && !defaultHealth.is_failing) {
-        nextProcessor = 'default';
-      } else {
-        return { message: "Payment failed" };
-      }
+    }
 
+    const nextProcessor = processor === 'default' ? 'fallback' : 'default';
+    const nextHealth = nextProcessor === 'default' ? defaultHealth : fallbackHealth;
+
+    if (nextHealth && !nextHealth.is_failing) {
       const fallbackResponse = await fetch(`http://payment-processor-${nextProcessor}:8080/payments`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          ...body,
-          requestedAt: new Date().toISOString(),
-        }),
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...body, requestedAt: new Date().toISOString() }),
       });
 
       if (fallbackResponse.ok) {
-        await sql`
-            INSERT INTO transactions (correlation_id, amount, processor, processed_at)
-            VALUES (${body.correlationId}, ${body.amount}, ${nextProcessor}, NOW());
-          `;
+        await paymentsRepository.createTransaction(body.correlationId, body.amount, nextProcessor);
         return { message: "Payment processed successfully" };
-      } else {
-        return { message: "Payment failed" };
       }
     }
+    
+    return { message: "Payment failed" };
+
   } catch (error) {
     console.error('Error processing payment:', error);
     return { message: "Payment failed" };
