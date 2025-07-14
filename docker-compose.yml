@@ -84,8 +84,20 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.2"
-          memory: "100MB"
+          cpus: "0.15"
+          memory: "80MB"
+    networks:
+      - rinha-net
+
+  redis:
+    image: redis:7-alpine
+    container_name: rinha-redis
+    hostname: rinha-redis
+    deploy:
+      resources:
+        limits:
+          cpus: "0.05"
+          memory: "20MB"
     networks:
       - rinha-net
 

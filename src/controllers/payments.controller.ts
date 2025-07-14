@@ -1,4 +1,5 @@
 import * as paymentsRepository from '../repositories/payments.repository';
+import { getHealthStatusSync } from '../services/health-check';
 
 export const getPaymentsSummary = async ({ query }: { query: { from?: string; to?: string } }) => {
   const result = await paymentsRepository.getSummary(query.from, query.to);
@@ -27,55 +28,51 @@ export const getPaymentsSummary = async ({ query }: { query: { from?: string; to
   return summary;
 };
 
-export const createPayment = async ({ body }: { body: { correlationId: string; amount: number } }) => {
-  const health = await paymentsRepository.getHealthStatus();
-  const defaultHealth = health.find(h => h.processor_name === 'default');
-  const fallbackHealth = health.find(h => h.processor_name === 'fallback');
-
-  let processor: 'default' | 'fallback' | null = null;
-
-  if (defaultHealth && !defaultHealth.is_failing) {
-    processor = 'default';
-  } else if (fallbackHealth && !fallbackHealth.is_failing) {
-    processor = 'fallback';
-  }
-
-  if (!processor) {
-    return { message: "Both payment processors are unavailable" };
-  }
-
+const attemptPayment = async (
+  processor: 'default' | 'fallback',
+  body: { correlationId: string; amount: number }
+): Promise<boolean> => {
   try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 500);
+
     const response = await fetch(`http://payment-processor-${processor}:8080/payments`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 
+        'Content-Type': 'application/json',
+        'Connection': 'close'
+      },
       body: JSON.stringify({ ...body, requestedAt: new Date().toISOString() }),
+      signal: controller.signal
     });
+    
+    clearTimeout(timeoutId);
+    return response.ok;
+  } catch (error) {
+    return false;
+  }
+};
 
-    if (response.ok) {
-      await paymentsRepository.createTransaction(body.correlationId, body.amount, processor);
+export const createPayment = async ({ body }: { body: { correlationId: string; amount: number } }) => {
+  const health = getHealthStatusSync();
+  
+  const isDefaultAvailable = !health.default.isFailing;
+  const isFallbackAvailable = !health.fallback.isFailing;
+
+  if (isDefaultAvailable) {
+    if (await attemptPayment('default', body)) {
+      await paymentsRepository.createTransaction(body.correlationId, body.amount, 'default');
       return { message: "Payment processed successfully" };
     }
-
-    const nextProcessor = processor === 'default' ? 'fallback' : 'default';
-    const nextHealth = nextProcessor === 'default' ? defaultHealth : fallbackHealth;
-
-    if (nextHealth && !nextHealth.is_failing) {
-      const fallbackResponse = await fetch(`http://payment-processor-${nextProcessor}:8080/payments`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...body, requestedAt: new Date().toISOString() }),
-      });
-
-      if (fallbackResponse.ok) {
-        await paymentsRepository.createTransaction(body.correlationId, body.amount, nextProcessor);
-        return { message: "Payment processed successfully" };
-      }
-    }
-    
-    return { message: "Payment failed" };
-
-  } catch (error) {
-    console.error('Error processing payment:', error);
-    return { message: "Payment failed" };
   }
+
+  if (isFallbackAvailable) {
+    if (await attemptPayment('fallback', body)) {
+      await paymentsRepository.createTransaction(body.correlationId, body.amount, 'fallback');
+      return { message: "Payment processed successfully" };
+    }
+  }
+
+  await paymentsRepository.addPendingPayment(body.correlationId, body.amount);
+  return { message: "Payment queued for processing" };
 };
