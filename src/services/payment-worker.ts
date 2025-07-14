@@ -1,5 +1,26 @@
 import * as paymentsRepository from '../repositories/payments.repository';
 import { getHealthStatusSync } from './health-check';
+import redis from '../infra/redis';
+
+async function tryAcquireWorkerLock(): Promise<boolean> {
+  try {
+    const result = await redis.set('worker_lock', '1', {
+      PX: 500, // 500ms TTL
+      NX: true
+    });
+    return result === 'OK';
+  } catch {
+    return false;
+  }
+}
+
+async function markPaymentAsProcessed(correlationId: string): Promise<void> {
+  try {
+    await redis.set(`payment:${correlationId}`, '1', { EX: 3600 });
+  } catch {
+    // Silent fail
+  }
+}
 
 const attemptPayment = async (
   processor: 'default' | 'fallback',
@@ -43,6 +64,7 @@ async function processPayment(payment: any): Promise<boolean> {
       correlationId: payment.correlation_id,
       amount: payment.amount
     })) {
+      await markPaymentAsProcessed(payment.correlation_id);
       await paymentsRepository.createTransaction(
         payment.correlation_id,
         payment.amount,
@@ -56,6 +78,12 @@ async function processPayment(payment: any): Promise<boolean> {
 }
 
 async function processQueue() {
+  // Try to acquire lock for queue processing
+  const hasLock = await tryAcquireWorkerLock();
+  if (!hasLock) {
+    return; // Another instance is processing the queue
+  }
+
   try {
     const pendingPayments = await paymentsRepository.getPendingPayments(20);
     

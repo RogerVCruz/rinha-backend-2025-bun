@@ -1,16 +1,42 @@
 import sql from '../infra/db';
+import redis from '../infra/redis';
 
 export async function getHealthStatus() {
   return sql`SELECT * FROM processor_health`;
 }
 
+async function getCachedSummary(from?: string, to?: string): Promise<any[] | null> {
+  try {
+    const key = `summary:${from || 'all'}:${to || 'all'}`;
+    const cached = await redis.get(key);
+    return cached ? JSON.parse(cached) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function setCachedSummary(data: any[], from?: string, to?: string): Promise<void> {
+  try {
+    const key = `summary:${from || 'all'}:${to || 'all'}`;
+    await redis.set(key, JSON.stringify(data), { EX: 5 }); // 5s TTL
+  } catch {
+    // Silent fail
+  }
+}
+
 export async function getSummary(from?: string, to?: string) {
+  // Try cache first
+  const cached = await getCachedSummary(from, to);
+  if (cached) {
+    return cached;
+  }
+
   let filter = sql``;
   if (from && to) {
     filter = sql`WHERE processed_at BETWEEN ${from} AND ${to}`;
   }
 
-  return sql`
+  const result = await sql`
       SELECT
         processor,
         COUNT(*) AS total_requests,
@@ -19,6 +45,22 @@ export async function getSummary(from?: string, to?: string) {
       ${filter}
       GROUP BY processor;
     `;
+
+  // Cache the result
+  await setCachedSummary(result, from, to);
+  return result;
+}
+
+async function invalidateSummaryCache(): Promise<void> {
+  try {
+    // Invalidate common summary cache keys
+    await Promise.all([
+      redis.del('summary:all:all'),
+      redis.del('summary:undefined:undefined')
+    ]);
+  } catch {
+    // Silent fail
+  }
 }
 
 export async function createTransaction(correlationId: string, amount: number, processor: 'default' | 'fallback') {
@@ -26,6 +68,9 @@ export async function createTransaction(correlationId: string, amount: number, p
       INSERT INTO transactions (correlation_id, amount, processor, processed_at)
       VALUES (${correlationId}, ${amount}, ${processor}, NOW());
     `;
+  
+  // Invalidate summary cache when new transaction is added
+  await invalidateSummaryCache();
 }
 
 export async function updateHealthStatus(processorName: 'default' | 'fallback', isFailing: boolean, minResponseTime: number) {

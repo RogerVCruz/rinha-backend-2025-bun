@@ -1,5 +1,23 @@
 import * as paymentsRepository from '../repositories/payments.repository';
 import { getHealthStatusSync } from '../services/health-check';
+import redis from '../infra/redis';
+
+async function isPaymentAlreadyProcessed(correlationId: string): Promise<boolean> {
+  try {
+    const exists = await redis.exists(`payment:${correlationId}`);
+    return exists === 1;
+  } catch {
+    return false;
+  }
+}
+
+async function markPaymentAsProcessed(correlationId: string): Promise<void> {
+  try {
+    await redis.set(`payment:${correlationId}`, '1', { EX: 3600 }); // 1 hour TTL
+  } catch {
+    // Silent fail
+  }
+}
 
 export const getPaymentsSummary = async ({ query }: { query: { from?: string; to?: string } }) => {
   const result = await paymentsRepository.getSummary(query.from, query.to);
@@ -54,6 +72,11 @@ const attemptPayment = async (
 };
 
 export const createPayment = async ({ body }: { body: { correlationId: string; amount: number } }) => {
+  // Check for duplicate payment first
+  if (await isPaymentAlreadyProcessed(body.correlationId)) {
+    return { message: "Payment already processed" };
+  }
+
   const health = getHealthStatusSync();
   
   const isDefaultAvailable = !health.default.isFailing;
@@ -61,6 +84,7 @@ export const createPayment = async ({ body }: { body: { correlationId: string; a
 
   if (isDefaultAvailable) {
     if (await attemptPayment('default', body)) {
+      await markPaymentAsProcessed(body.correlationId);
       await paymentsRepository.createTransaction(body.correlationId, body.amount, 'default');
       return { message: "Payment processed successfully" };
     }
@@ -68,6 +92,7 @@ export const createPayment = async ({ body }: { body: { correlationId: string; a
 
   if (isFallbackAvailable) {
     if (await attemptPayment('fallback', body)) {
+      await markPaymentAsProcessed(body.correlationId);
       await paymentsRepository.createTransaction(body.correlationId, body.amount, 'fallback');
       return { message: "Payment processed successfully" };
     }
