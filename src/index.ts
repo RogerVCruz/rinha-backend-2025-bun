@@ -1,7 +1,13 @@
-import { Elysia } from "elysia";
+import { Elysia } from 'elysia';
+import { payments } from './routes/payments';
+import { startHealthCheck } from './services/health-check';
 
-const app = new Elysia().get("/", () => "Hello Elysia").listen(3000);
+startHealthCheck();
+
+const app = new Elysia()
+  .use(payments)
+  .listen(9999);
 
 console.log(
-  `🦊 Elysia is running at ${app.server?.hostname}:${app.server?.port}`
+  `🦊 Elysia is running at http://${app.server?.hostname}:${app.server?.port}`
 );
