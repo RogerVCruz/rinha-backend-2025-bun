@@ -1,5 +1,4 @@
 services:
-  # Minha Aplicação
   db:
     image: postgres:16-alpine
     container_name: rinha-db
@@ -12,25 +11,36 @@ services:
       - "5432:5432"
     volumes:
       - ./init-rinha-db.sql:/docker-entrypoint-initdb.d/init.sql
+    deploy:
+      resources:
+        limits:
+          cpus: "0.2"
+          memory: "70MB"
     networks:
       - rinha-net
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U admin -d rinha"]
-      interval: 5s
+      interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 3
 
   redis:
     image: redis:7-alpine
     container_name: rinha-redis
     hostname: rinha-redis
+    command: redis-server --maxmemory 15mb --maxmemory-policy allkeys-lru
+    deploy:
+      resources:
+        limits:
+          cpus: "0.05"
+          memory: "18MB"
     networks:
       - rinha-net
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
+      interval: 10s
       timeout: 3s
-      retries: 5
+      retries: 3
 
   api1: &api
     build: .
@@ -44,8 +54,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.4"
-          memory: "95MB"
+          cpus: "0.55"
+          memory: "120MB"
     networks:
       - rinha-net
       - payment-processor
@@ -73,6 +83,11 @@ services:
     restart: unless-stopped
     ports:
       - "9999:9999"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.15"
+          memory: "22MB"
     networks:
       - rinha-net
 

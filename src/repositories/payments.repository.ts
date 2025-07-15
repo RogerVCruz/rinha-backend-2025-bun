@@ -69,24 +69,14 @@ export async function createTransaction(correlationId: string, amount: number, p
     // Insert transaction within transaction block
     await sql`
         INSERT INTO transactions (correlation_id, amount, processor, processed_at)
-        VALUES (${correlationId}, ${amount}, ${processor}, NOW());
+        VALUES (${correlationId}, ${amount}, ${processor}, NOW())
+        ON CONFLICT (correlation_id) DO NOTHING;
       `;
-    
-    // Verify the insert was successful
-    const [verification] = await sql`
-        SELECT correlation_id FROM transactions 
-        WHERE correlation_id = ${correlationId} AND processor = ${processor}
-        LIMIT 1;
-      `;
-    
-    if (!verification) {
-      throw new Error(`Transaction verification failed for ${correlationId}`);
-    }
     
     // Invalidate summary cache when new transaction is added
     await invalidateSummaryCache();
     
-    return verification;
+    return { correlation_id: correlationId };
   });
 }
 
@@ -112,7 +102,8 @@ export async function updateHealthStatus(processorName: 'default' | 'fallback', 
 export async function addPendingPayment(correlationId: string, amount: number) {
   await sql`
       INSERT INTO pending_payments (correlation_id, amount)
-      VALUES (${correlationId}, ${amount});
+      VALUES (${correlationId}, ${amount})
+      ON CONFLICT (correlation_id) DO NOTHING;
     `;
 }
 
@@ -147,7 +138,7 @@ export async function markPaymentFailed(id: number, retryCount: number) {
     await sql`
         UPDATE pending_payments
         SET retry_count = ${retryCount + 1},
-            next_retry_at = NOW() + INTERVAL '${nextRetryDelay} seconds'
+            next_retry_at = ${new Date(Date.now() + nextRetryDelay * 1000)}
         WHERE id = ${id};
       `;
   }

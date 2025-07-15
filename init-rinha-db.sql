@@ -1,3 +1,13 @@
+-- Configurações para ambiente limitado de recursos
+ALTER SYSTEM SET max_connections = '15';          -- Reduzido de 100
+
+-- Timeouts otimizados
+ALTER SYSTEM SET statement_timeout = '30s';       -- Mata queries longas
+ALTER SYSTEM SET lock_timeout = '10s';
+ALTER SYSTEM SET idle_in_transaction_session_timeout = '60s';
+
+SELECT pg_reload_conf();
+
 CREATE TABLE IF NOT EXISTS processor_health (
     processor_name VARCHAR(20) PRIMARY KEY,
     is_failing BOOLEAN NOT NULL,

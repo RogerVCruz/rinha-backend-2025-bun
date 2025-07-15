@@ -81,18 +81,18 @@ export const createPayment = async ({
     return { error: "Invalid payload" };
   }
 
-  // Check for duplicate payment in BOTH cache AND database
-  if (await isPaymentAlreadyProcessed(body.correlationId)) {
-    set.status = 409;
-    return { error: "Payment already processed" };
-  }
+  // // Check for duplicate payment in BOTH cache AND database
+  // if (await isPaymentAlreadyProcessed(body.correlationId)) {
+  //   set.status = 409;
+  //   return { error: "Payment already processed" };
+  // }
 
-  // Double-check in database to prevent race conditions
-  if (await isPaymentInDatabase(body.correlationId)) {
-    await markPaymentAsProcessed(body.correlationId); // Sync cache
-    set.status = 409;
-    return { error: "Payment already processed" };
-  }
+  // // Double-check in database to prevent race conditions
+  // if (await isPaymentInDatabase(body.correlationId)) {
+  //   await markPaymentAsProcessed(body.correlationId); // Sync cache
+  //   set.status = 409;
+  //   return { error: "Payment already processed" };
+  // }
 
   // Add payment to queue for async processing
   try {
