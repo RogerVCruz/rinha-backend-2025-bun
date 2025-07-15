@@ -1,5 +1,5 @@
 import * as paymentsRepository from "../repositories/payments.repository";
-import { getHealthStatusSync } from "../services/health-check";
+import { processPaymentAsync } from "../services/payment-worker";
 import redis from "../infra/redis";
 
 async function isPaymentAlreadyProcessed(
@@ -64,115 +64,50 @@ export const getPaymentsSummary = async ({
   return summary;
 };
 
-const attemptPayment = async (
-  processor: "default" | "fallback",
-  body: { correlationId: string; amount: number }
-): Promise<boolean> => {
-  try {
-    const controller = new AbortController();
-    // const timeoutId = setTimeout(() => controller.abort(), 3000);
-
-    const response = await fetch(
-      `http://payment-processor-${processor}:8080/payments`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Connection: "close",
-        },
-        body: JSON.stringify({
-          ...body,
-          requestedAt: new Date().toISOString(),
-        }),
-        signal: controller.signal,
-      }
-    );
-
-    // clearTimeout(timeoutId);
-
-    if (!response.ok) {
-      console.warn(
-        `Payment processor ${processor} returned ${response.status}: ${response.statusText}`
-      );
-    }
-
-    return response.ok;
-  } catch (error: any) {
-    if (error.name === "AbortError") {
-      console.warn(`Payment processor ${processor} timed out`);
-    } else {
-      console.warn(`Payment processor ${processor} failed:`, error.message);
-    }
-    return false;
-  }
-};
 
 export const createPayment = async ({
   body,
+  set,
 }: {
   body: { correlationId: string; amount: number };
+  set: any;
 }) => {
+  if (
+    !body.correlationId ||
+    typeof body.correlationId !== "string" ||
+    typeof body.amount !== "number"
+  ) {
+    set.status = 400;
+    return { error: "Invalid payload" };
+  }
+
   // Check for duplicate payment in BOTH cache AND database
   if (await isPaymentAlreadyProcessed(body.correlationId)) {
-    return { message: "Payment already processed" };
+    set.status = 409;
+    return { error: "Payment already processed" };
   }
 
   // Double-check in database to prevent race conditions
   if (await isPaymentInDatabase(body.correlationId)) {
     await markPaymentAsProcessed(body.correlationId); // Sync cache
-    return { message: "Payment already processed" };
+    set.status = 409;
+    return { error: "Payment already processed" };
   }
 
-  const health = getHealthStatusSync();
-
-  const isDefaultAvailable = !health.default.isFailing;
-  const isFallbackAvailable = !health.fallback.isFailing;
-
-  // Try default processor first (lower fees) - SEQUENTIAL for consistency
-  if (isDefaultAvailable) {
-    try {
-      if (await attemptPayment("default", body)) {
-        // ATOMIC: Only mark as processed AFTER successful DB transaction
-        await paymentsRepository.createTransaction(
-          body.correlationId,
-          body.amount,
-          "default"
-        );
-        await markPaymentAsProcessed(body.correlationId);
-        return { message: "Payment processed successfully" };
-      }
-    } catch (error) {
-      console.warn("Default processor transaction failed:", error);
-      // Continue to fallback
-    }
-  }
-
-  // Try fallback processor if default failed or unavailable
-  if (isFallbackAvailable) {
-    try {
-      if (await attemptPayment("fallback", body)) {
-        // ATOMIC: Only mark as processed AFTER successful DB transaction
-        await paymentsRepository.createTransaction(
-          body.correlationId,
-          body.amount,
-          "fallback"
-        );
-        await markPaymentAsProcessed(body.correlationId);
-        return { message: "Payment processed successfully" };
-      }
-    } catch (error) {
-      console.warn("Fallback processor transaction failed:", error);
-      // Continue to queueing
-    }
-  }
-
-  // All processors failed - try to queue for later (with error handling)
+  // Add payment to queue for async processing
   try {
     await paymentsRepository.addPendingPayment(body.correlationId, body.amount);
-    return { message: "Payment queued for processing" };
+    
+    // Process payment asynchronously (fire and forget)
+    processPaymentAsync(body.correlationId, body.amount).catch((error) => {
+      console.error("Async payment processing failed:", error);
+    });
+
+    set.status = 202;
+    return { message: "Payment accepted for processing", correlationId: body.correlationId };
   } catch (error) {
-    // If queueing fails, at least return a proper error
-    return { message: "Payment failed - all processors unavailable" };
+    set.status = 500;
+    return { error: "Failed to queue payment for processing" };
   }
 };
 

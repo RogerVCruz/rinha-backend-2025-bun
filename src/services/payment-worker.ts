@@ -108,6 +108,66 @@ async function processQueue() {
   }
 }
 
+export async function processPaymentAsync(
+  correlationId: string,
+  amount: number
+): Promise<void> {
+  try {
+    const health = getHealthStatusSync();
+    const isDefaultAvailable = !health.default.isFailing;
+    const isFallbackAvailable = !health.fallback.isFailing;
+
+    const body = { correlationId, amount };
+
+    // Try default processor first (lower fees) - SEQUENTIAL for consistency
+    if (isDefaultAvailable) {
+      try {
+        if (await attemptPayment("default", body)) {
+          // ATOMIC: Only mark as processed AFTER successful DB transaction
+          await paymentsRepository.createTransaction(
+            correlationId,
+            amount,
+            "default"
+          );
+          await markPaymentAsProcessed(correlationId);
+          return;
+        }
+      } catch (error) {
+        console.warn("Default processor transaction failed:", error);
+        // Continue to fallback
+      }
+    }
+
+    // Try fallback processor if default failed or unavailable
+    if (isFallbackAvailable) {
+      try {
+        if (await attemptPayment("fallback", body)) {
+          // ATOMIC: Only mark as processed AFTER successful DB transaction
+          await paymentsRepository.createTransaction(
+            correlationId,
+            amount,
+            "fallback"
+          );
+          await markPaymentAsProcessed(correlationId);
+          return;
+        }
+      } catch (error) {
+        console.warn("Fallback processor transaction failed:", error);
+        // Continue to queueing
+      }
+    }
+
+    // All processors failed - try to queue for later (with error handling)
+    try {
+      await paymentsRepository.addPendingPayment(correlationId, amount);
+    } catch (error) {
+      console.error("Failed to queue payment:", error);
+    }
+  } catch (error) {
+    console.error("Payment processing failed:", error);
+  }
+}
+
 export function startPaymentWorker() {
   // Immediate processing
   processQueue();

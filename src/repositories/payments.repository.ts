@@ -158,7 +158,7 @@ export async function purgeAllPayments() {
     await Promise.all([
       sql`DELETE FROM transactions`,
       sql`DELETE FROM pending_payments`,
-      redis.flushall() // Clear all Redis cache
+      redis.flushAll() // Clear all Redis cache
     ]);
   } catch (error) {
     console.warn('Full purge failed, trying database only:', error);
