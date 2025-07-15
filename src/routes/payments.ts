@@ -1,5 +1,5 @@
 import { Elysia, t } from 'elysia';
-import { createPayment, getPaymentsSummary } from '../controllers/payments.controller';
+import { createPayment, getPaymentsSummary, purgePayments } from '../controllers/payments.controller';
 
 export const payments = new Elysia()
   .get("/payments-summary", getPaymentsSummary, {
@@ -13,4 +13,5 @@ export const payments = new Elysia()
         correlationId: t.String(),
         amount: t.Number(),
     })
-  });
+  })
+  .post("/purge-payments", purgePayments);

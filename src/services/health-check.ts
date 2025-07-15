@@ -22,7 +22,8 @@ async function tryAcquireLock(): Promise<boolean> {
       NX: true
     });
     return result === 'OK';
-  } catch {
+  } catch (error) {
+    console.warn('Health check lock acquisition failed:', error);
     return false;
   }
 }
@@ -31,23 +32,24 @@ async function getCachedHealth(): Promise<HealthStatus | null> {
   try {
     const cached = await redis.get('health_status');
     return cached ? JSON.parse(cached) : null;
-  } catch {
+  } catch (error) {
+    console.warn('Failed to get cached health:', error);
     return null;
   }
 }
 
 async function setCachedHealth(health: HealthStatus): Promise<void> {
   try {
-    await redis.set('health_status', JSON.stringify(health), { EX: 10 });
-  } catch {
-
+    await redis.set('health_status', JSON.stringify(health), { EX: 15 }); // Longer cache TTL
+  } catch (error) {
+    console.warn('Failed to cache health status:', error);
   }
 }
 
 async function getHealthData(url: string): Promise<{ failing: boolean; minResponseTime: number } | null> {
   try {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 2000);
+    const timeoutId = setTimeout(() => controller.abort(), 4000);
     
     const response = await fetch(url, { 
       signal: controller.signal,
@@ -106,5 +108,8 @@ async function checkHealth() {
 }
 
 export function startHealthCheck() {
-    setInterval(checkHealth, 2000);
+    // Immediate check on startup
+    checkHealth();
+    // Check every 3 seconds instead of 2 (closer to 5s rate limit)
+    setInterval(checkHealth, 3000);
 }

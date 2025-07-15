@@ -8,7 +8,7 @@ startPaymentWorker();
 
 const app = new Elysia()
   .use(payments)
-  .listen(9999);
+  .listen(3000);
 
 console.log(
   `🦊 Elysia is running at http://${app.server?.hostname}:${app.server?.port}`

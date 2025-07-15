@@ -9,7 +9,8 @@ async function tryAcquireWorkerLock(): Promise<boolean> {
       NX: true
     });
     return result === 'OK';
-  } catch {
+  } catch (error) {
+    console.warn('Worker lock acquisition failed:', error);
     return false;
   }
 }
@@ -17,8 +18,8 @@ async function tryAcquireWorkerLock(): Promise<boolean> {
 async function markPaymentAsProcessed(correlationId: string): Promise<void> {
   try {
     await redis.set(`payment:${correlationId}`, '1', { EX: 3600 });
-  } catch {
-    // Silent fail
+  } catch (error) {
+    console.warn('Failed to mark payment as processed in worker:', error);
   }
 }
 
@@ -28,7 +29,7 @@ const attemptPayment = async (
 ): Promise<boolean> => {
   try {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 1000);
+    // const timeoutId = setTimeout(() => controller.abort(), 3000);
 
     const response = await fetch(`http://payment-processor-${processor}:8080/payments`, {
       method: 'POST',
@@ -40,7 +41,7 @@ const attemptPayment = async (
       signal: controller.signal
     });
     
-    clearTimeout(timeoutId);
+    // clearTimeout(timeoutId);
     return response.ok;
   } catch (error) {
     return false;
@@ -64,13 +65,19 @@ async function processPayment(payment: any): Promise<boolean> {
       correlationId: payment.correlation_id,
       amount: payment.amount
     })) {
-      await markPaymentAsProcessed(payment.correlation_id);
-      await paymentsRepository.createTransaction(
-        payment.correlation_id,
-        payment.amount,
-        processor
-      );
-      return true;
+      try {
+        // ATOMIC: DB transaction first, then cache
+        await paymentsRepository.createTransaction(
+          payment.correlation_id,
+          payment.amount,
+          processor
+        );
+        await markPaymentAsProcessed(payment.correlation_id);
+        return true;
+      } catch (error) {
+        console.warn(`Worker transaction failed for ${payment.correlation_id}:`, error);
+        return false; // Will retry
+      }
     }
   }
   
@@ -97,11 +104,13 @@ async function processQueue() {
       }
     }
   } catch (error) {
-    // Silent fail to avoid spam
+    console.warn('Payment queue processing failed:', error);
   }
 }
 
 export function startPaymentWorker() {
-  setInterval(processQueue, 100);
+  // Immediate processing
   processQueue();
+  // Reduced frequency to 200ms for better resource usage
+  setInterval(processQueue, 200);
 }

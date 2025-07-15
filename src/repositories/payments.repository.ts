@@ -10,7 +10,8 @@ async function getCachedSummary(from?: string, to?: string): Promise<any[] | nul
     const key = `summary:${from || 'all'}:${to || 'all'}`;
     const cached = await redis.get(key);
     return cached ? JSON.parse(cached) : null;
-  } catch {
+  } catch (error) {
+    console.warn('Cache read failed for summary:', error);
     return null;
   }
 }
@@ -18,9 +19,9 @@ async function getCachedSummary(from?: string, to?: string): Promise<any[] | nul
 async function setCachedSummary(data: any[], from?: string, to?: string): Promise<void> {
   try {
     const key = `summary:${from || 'all'}:${to || 'all'}`;
-    await redis.set(key, JSON.stringify(data), { EX: 5 }); // 5s TTL
-  } catch {
-    // Silent fail
+    await redis.set(key, JSON.stringify(data), { EX: 10 }); // 10s TTL for better cache hit ratio
+  } catch (error) {
+    console.warn('Cache write failed for summary:', error);
   }
 }
 
@@ -58,19 +59,43 @@ async function invalidateSummaryCache(): Promise<void> {
       redis.del('summary:all:all'),
       redis.del('summary:undefined:undefined')
     ]);
-  } catch {
-    // Silent fail
+  } catch (error) {
+    console.warn('Cache invalidation failed:', error);
   }
 }
 
 export async function createTransaction(correlationId: string, amount: number, processor: 'default' | 'fallback') {
-  await sql`
-      INSERT INTO transactions (correlation_id, amount, processor, processed_at)
-      VALUES (${correlationId}, ${amount}, ${processor}, NOW());
+  return await sql.begin(async sql => {
+    // Insert transaction within transaction block
+    await sql`
+        INSERT INTO transactions (correlation_id, amount, processor, processed_at)
+        VALUES (${correlationId}, ${amount}, ${processor}, NOW());
+      `;
+    
+    // Verify the insert was successful
+    const [verification] = await sql`
+        SELECT correlation_id FROM transactions 
+        WHERE correlation_id = ${correlationId} AND processor = ${processor}
+        LIMIT 1;
+      `;
+    
+    if (!verification) {
+      throw new Error(`Transaction verification failed for ${correlationId}`);
+    }
+    
+    // Invalidate summary cache when new transaction is added
+    await invalidateSummaryCache();
+    
+    return verification;
+  });
+}
+
+export async function checkPaymentExists(correlationId: string) {
+  return sql`
+      SELECT correlation_id FROM transactions 
+      WHERE correlation_id = ${correlationId}
+      LIMIT 1;
     `;
-  
-  // Invalidate summary cache when new transaction is added
-  await invalidateSummaryCache();
 }
 
 export async function updateHealthStatus(processorName: 'default' | 'fallback', isFailing: boolean, minResponseTime: number) {
@@ -125,5 +150,26 @@ export async function markPaymentFailed(id: number, retryCount: number) {
             next_retry_at = NOW() + INTERVAL '${nextRetryDelay} seconds'
         WHERE id = ${id};
       `;
+  }
+}
+
+export async function purgeAllPayments() {
+  try {
+    await Promise.all([
+      sql`DELETE FROM transactions`,
+      sql`DELETE FROM pending_payments`,
+      redis.flushall() // Clear all Redis cache
+    ]);
+  } catch (error) {
+    console.warn('Full purge failed, trying database only:', error);
+    try {
+      await Promise.all([
+        sql`DELETE FROM transactions`,
+        sql`DELETE FROM pending_payments`
+      ]);
+    } catch (dbError) {
+      console.error('Database purge failed:', dbError);
+      throw dbError; // Re-throw to indicate failure
+    }
   }
 }
