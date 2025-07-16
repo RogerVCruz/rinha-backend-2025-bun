@@ -1,6 +1,7 @@
 import * as paymentsRepository from '../repositories/payments.repository';
 import { getHealthStatusSync } from './health-check';
 import redis from '../infra/redis';
+import * as redisQueue from './redis-queue';
 
 async function tryAcquireWorkerLock(): Promise<boolean> {
   try {
@@ -17,7 +18,7 @@ async function tryAcquireWorkerLock(): Promise<boolean> {
 
 async function markPaymentAsProcessed(correlationId: string): Promise<void> {
   try {
-    await redis.set(`payment:${correlationId}`, '1', { EX: 3600 });
+    await redisQueue.markAsProcessed(correlationId);
   } catch (error) {
     console.warn('Failed to mark payment as processed in worker:', error);
   }
@@ -48,7 +49,7 @@ const attemptPayment = async (
   }
 };
 
-async function processPayment(payment: any): Promise<boolean> {
+async function processPayment(payment: { correlationId: string; amount: number; retryCount: number }): Promise<boolean> {
   const health = getHealthStatusSync();
   
   const processors: Array<'default' | 'fallback'> = [];
@@ -62,20 +63,20 @@ async function processPayment(payment: any): Promise<boolean> {
   
   for (const processor of processors) {
     if (await attemptPayment(processor, {
-      correlationId: payment.correlation_id,
+      correlationId: payment.correlationId,
       amount: payment.amount
     })) {
       try {
         // ATOMIC: DB transaction first, then cache
         await paymentsRepository.createTransaction(
-          payment.correlation_id,
+          payment.correlationId,
           payment.amount,
           processor
         );
-        await markPaymentAsProcessed(payment.correlation_id);
+        await redisQueue.markAsProcessed(payment.correlationId);
         return true;
       } catch (error) {
-        console.warn(`Worker transaction failed for ${payment.correlation_id}:`, error);
+        console.warn(`Worker transaction failed for ${payment.correlationId}:`, error);
         return false; // Will retry
       }
     }
@@ -92,15 +93,21 @@ async function processQueue() {
   }
 
   try {
-    const pendingPayments = await paymentsRepository.getPendingPayments(20);
+    // Get items from main queue and retry queue
+    const [mainQueueItems, retryItems] = await Promise.all([
+      redisQueue.getFromQueue(20),
+      redisQueue.getRetryableItems()
+    ]);
     
-    for (const payment of pendingPayments) {
+    const allItems = [...mainQueueItems, ...retryItems];
+    
+    for (const payment of allItems) {
       const success = await processPayment(payment);
       
       if (success) {
-        await paymentsRepository.markPaymentProcessed(payment.id);
+        await redisQueue.markAsProcessed(payment.correlationId);
       } else {
-        await paymentsRepository.markPaymentFailed(payment.id, payment.retry_count);
+        await redisQueue.addToRetryQueue(payment.correlationId, payment.amount, payment.retryCount);
       }
     }
   } catch (error) {
@@ -159,7 +166,7 @@ export async function processPaymentAsync(
 
     // All processors failed - try to queue for later (with error handling)
     try {
-      await paymentsRepository.addPendingPayment(correlationId, amount);
+      await redisQueue.addToQueue(correlationId, amount);
     } catch (error) {
       console.error("Failed to queue payment:", error);
     }

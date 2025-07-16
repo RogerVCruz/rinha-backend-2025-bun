@@ -1,6 +1,7 @@
 import * as paymentsRepository from "../repositories/payments.repository";
 import { processPaymentAsync } from "../services/payment-worker";
 import redis from "../infra/redis";
+import * as redisQueue from "../services/redis-queue";
 
 async function isPaymentAlreadyProcessed(
   correlationId: string
@@ -96,7 +97,7 @@ export const createPayment = async ({
 
   // Add payment to queue for async processing
   try {
-    await paymentsRepository.addPendingPayment(body.correlationId, body.amount);
+    await redisQueue.addToQueue(body.correlationId, body.amount);
     
     // Process payment asynchronously (fire and forget)
     processPaymentAsync(body.correlationId, body.amount).catch((error) => {
@@ -112,6 +113,9 @@ export const createPayment = async ({
 };
 
 export const purgePayments = async () => {
-  await paymentsRepository.purgeAllPayments();
+  await Promise.all([
+    paymentsRepository.purgeAllPayments(),
+    redisQueue.purgeAllQueues()
+  ]);
   return { message: "All payments purged successfully" };
 };

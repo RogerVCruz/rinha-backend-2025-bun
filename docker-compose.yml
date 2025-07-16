@@ -14,8 +14,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.2"
-          memory: "70MB"
+          cpus: "0.35"
+          memory: "180MB"  # +65MB (era 115MB) - CRÍTICO para evitar OOM
     networks:
       - rinha-net
     healthcheck:
@@ -28,12 +28,12 @@ services:
     image: redis:7-alpine
     container_name: rinha-redis
     hostname: rinha-redis
-    command: redis-server --maxmemory 15mb --maxmemory-policy allkeys-lru
+    command: redis-server --maxmemory 17mb --maxmemory-policy allkeys-lru --save ""
     deploy:
       resources:
         limits:
-          cpus: "0.05"
-          memory: "18MB"
+          cpus: "0.08"
+          memory: "20MB"   # -43MB (estava subutilizado - 2.07MB usado)
     networks:
       - rinha-net
     healthcheck:
@@ -54,8 +54,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.55"
-          memory: "120MB"
+          cpus: "0.465"
+          memory: "70MB"   # -5MB cada (era 75MB) - Mais conservador
     networks:
       - rinha-net
       - payment-processor
@@ -86,8 +86,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.15"
-          memory: "22MB"
+          cpus: "0.2"      # +0.05 CPU para resolver EOF
+          memory: "30MB"   # +8MB para buffers maiores
     networks:
       - rinha-net
 
@@ -96,4 +96,3 @@ networks:
     driver: bridge
   payment-processor:
     external: true
-
