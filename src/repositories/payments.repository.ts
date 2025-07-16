@@ -19,37 +19,86 @@ async function getCachedSummary(from?: string, to?: string): Promise<any[] | nul
 async function setCachedSummary(data: any[], from?: string, to?: string): Promise<void> {
   try {
     const key = `summary:${from || 'all'}:${to || 'all'}`;
-    await redis.set(key, JSON.stringify(data), { EX: 10 }); // 10s TTL for better cache hit ratio
+    // Intelligent TTL: shorter for recent data, longer for historical data
+    const isRecentQuery = from && to && new Date(to).getTime() > Date.now() - 60000; // within last minute
+    const ttl = isRecentQuery ? 2 : 30; // 2s for recent, 30s for historical
+    
+    await redis.set(key, JSON.stringify(data), { EX: ttl });
   } catch (error) {
     console.warn('Cache write failed for summary:', error);
   }
 }
 
 export async function getSummary(from?: string, to?: string) {
+  const startTime = Date.now();
+  
   // Try cache first
   const cached = await getCachedSummary(from, to);
   if (cached) {
+    console.log(`Summary cache hit in ${Date.now() - startTime}ms for range: ${from || 'all'} to ${to || 'all'}`);
     return cached;
   }
 
+  // Build optimized filter for UTC timestamps
   let filter = sql``;
   if (from && to) {
-    filter = sql`WHERE processed_at BETWEEN ${from} AND ${to}`;
+    // Ensure timestamps are treated as UTC and convert to proper format
+    const fromUTC = new Date(from).toISOString();
+    const toUTC = new Date(to).toISOString();
+    filter = sql`WHERE processed_at BETWEEN ${fromUTC}::timestamptz AND ${toUTC}::timestamptz`;
   }
 
+  const queryStartTime = Date.now();
+  
+  // Optimized query with proper type casting for consistency
   const result = await sql`
       SELECT
         processor,
-        COUNT(*) AS total_requests,
-        SUM(amount) AS total_amount
+        COUNT(*)::integer AS total_requests,
+        COALESCE(SUM(amount), 0)::numeric(10,2) AS total_amount
       FROM transactions
       ${filter}
-      GROUP BY processor;
+      GROUP BY processor
+      ORDER BY processor;
     `;
 
+  const queryTime = Date.now() - queryStartTime;
+  console.log(`Summary query executed in ${queryTime}ms for range: ${from || 'all'} to ${to || 'all'}, rows: ${result.length}`);
+
+  // Always return both processors even if no data exists
+  const processedResult = ensureAllProcessors(result);
+  
   // Cache the result
-  await setCachedSummary(result, from, to);
-  return result;
+  await setCachedSummary(processedResult, from, to);
+  
+  const totalTime = Date.now() - startTime;
+  console.log(`Summary total time: ${totalTime}ms (query: ${queryTime}ms)`);
+  
+  return processedResult;
+}
+
+// Helper function to ensure both default and fallback processors are always present
+function ensureAllProcessors(queryResult: any[]): any[] {
+  const processors = ['default', 'fallback'];
+  const resultMap = new Map();
+  
+  // Map existing results
+  queryResult.forEach(row => {
+    resultMap.set(row.processor, row);
+  });
+  
+  // Ensure all processors exist with zero values if missing
+  return processors.map(processor => {
+    if (resultMap.has(processor)) {
+      return resultMap.get(processor);
+    } else {
+      return {
+        processor,
+        total_requests: 0,
+        total_amount: 0
+      };
+    }
+  });
 }
 
 async function invalidateSummaryCache(): Promise<void> {
@@ -69,7 +118,7 @@ export async function createTransaction(correlationId: string, amount: number, p
     // Insert transaction within transaction block
     await sql`
         INSERT INTO transactions (correlation_id, amount, processor, processed_at)
-        VALUES (${correlationId}, ${amount}, ${processor}, NOW())
+        VALUES (${correlationId}, ${amount}, ${processor}, NOW() AT TIME ZONE 'UTC')
         ON CONFLICT (correlation_id) DO NOTHING;
       `;
     
@@ -91,7 +140,7 @@ export async function checkPaymentExists(correlationId: string) {
 export async function updateHealthStatus(processorName: 'default' | 'fallback', isFailing: boolean, minResponseTime: number) {
   await sql`
       INSERT INTO processor_health (processor_name, is_failing, min_response_time, last_checked_at)
-      VALUES (${processorName}, ${isFailing}, ${minResponseTime}, NOW())
+      VALUES (${processorName}, ${isFailing}, ${minResponseTime}, NOW() AT TIME ZONE 'UTC')
       ON CONFLICT (processor_name) DO UPDATE
       SET is_failing = EXCLUDED.is_failing,
           min_response_time = EXCLUDED.min_response_time,
@@ -111,7 +160,7 @@ export async function getPendingPayments(limit = 50) {
   return sql`
       SELECT id, correlation_id, amount, retry_count
       FROM pending_payments
-      WHERE status = 'pending' AND next_retry_at <= NOW()
+      WHERE status = 'pending' AND next_retry_at <= NOW() AT TIME ZONE 'UTC'
       ORDER BY next_retry_at
       LIMIT ${limit};
     `;
