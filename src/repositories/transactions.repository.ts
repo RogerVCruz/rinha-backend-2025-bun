@@ -62,6 +62,43 @@ export async function getSummary(from?: string, to?: string): Promise<Transactio
   }
 }
 
+export async function createManyTransactions(transactions: Array<{ correlationId: string, amount: number, processor: ProcessorType }>) {
+  if (transactions.length === 0) {
+    return;
+  }
+
+  const uniqueTransactions = transactions.filter((t, index, self) => 
+    index === self.findIndex(t2 => t2.correlationId === t.correlationId)
+  );
+
+  return await sql.begin(async sql => {
+    const result = await sql`
+      INSERT INTO transactions (correlation_id, amount, processor, processed_at)
+      SELECT correlation_id, amount, processor, NOW() AT TIME ZONE 'UTC'
+      FROM ${sql(uniqueTransactions, 'correlation_id', 'amount', 'processor')} AS t(correlation_id, amount, processor)
+      ON CONFLICT (correlation_id) DO NOTHING
+      RETURNING correlation_id, amount, processor;
+    `;
+
+    if (result.length > 0) {
+      const counters = {
+        default: { requests: 0, amount: 0 },
+        fallback: { requests: 0, amount: 0 },
+      };
+
+      for (const row of result) {
+        const processor = row.processor as ProcessorType;
+        counters[processor].requests++;
+        counters[processor].amount += row.amount;
+      }
+
+      await RedisSummaryService.incrementManyCounters(counters);
+    }
+
+    await CacheService.invalidateSummary();
+  });
+}
+
 export async function purgeTransactions() {
   await sql`DELETE FROM transactions`;
   await RedisSummaryService.clearCounters();

@@ -41,7 +41,7 @@ export const getPaymentsSummary = async ({
 }) => {
   // Add timeout for database operations
   const timeoutPromise = new Promise((_, reject) => {
-    setTimeout(() => reject(new Error('Summary query timeout')), 3000); // 3 second timeout
+    setTimeout(() => reject(new Error('Summary query timeout')), 50); // 50ms timeout
   });
 
   try {
@@ -136,10 +136,7 @@ export const createPayment = async ({
 };
 
 export const purgePayments = async () => {
-  await Promise.all([
-    paymentsRepository.purgeAllPayments(),
-    redisQueue.purgeAllQueues()
-  ]);
+  await paymentsRepository.purgeAllPayments();
   return { message: "All payments purged successfully" };
 };
 

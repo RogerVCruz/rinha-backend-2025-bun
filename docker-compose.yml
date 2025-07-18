@@ -14,8 +14,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.35"
-          memory: "160MB"  # +65MB (era 115MB) - CRÍTICO para evitar OOM
+          cpus: "0.30"
+          memory: "120MB"  # +65MB (era 115MB) - CRÍTICO para evitar OOM
     networks:
       - rinha-net
     healthcheck:
@@ -28,12 +28,12 @@ services:
     image: redis:7-alpine
     container_name: rinha-redis
     hostname: rinha-redis
-    command: redis-server --maxmemory 17mb --maxmemory-policy allkeys-lru --save ""
+    command: redis-server --maxmemory 58mb --maxmemory-policy allkeys-lru --save ""
     deploy:
       resources:
         limits:
-          cpus: "0.05"
-          memory: "20MB"   # -43MB (estava subutilizado - 2.07MB usado)
+          cpus: "0.10"
+          memory: "60MB"   # -43MB (estava subutilizado - 2.07MB usado)
     networks:
       - rinha-net
     healthcheck:

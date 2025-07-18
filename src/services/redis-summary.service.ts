@@ -28,6 +28,24 @@ export class RedisSummaryService {
     }
   }
 
+  static async incrementManyCounters(counters: Record<ProcessorType, { requests: number, amount: number }>): Promise<void> {
+    try {
+      const multi = redis.multi();
+      for (const processor in counters) {
+        const key = this.getProcessorKey(processor as ProcessorType);
+        const { requests, amount } = counters[processor as ProcessorType];
+
+        if (requests > 0) {
+          multi.hIncrBy(key, 'total_requests', requests);
+          multi.hIncrByFloat(key, 'total_amount', amount);
+        }
+      }
+      await multi.exec();
+    } catch (error) {
+      console.warn('Failed to bulk update Redis summary counters:', error);
+    }
+  }
+
   static async getSummary(): Promise<SummaryData[]> {
     try {
       const processors: ProcessorType[] = ['default', 'fallback'];

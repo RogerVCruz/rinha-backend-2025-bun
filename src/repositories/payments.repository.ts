@@ -10,6 +10,7 @@ export const updateHealthStatus = healthRepo.updateHealthStatus;
 
 export const createTransaction = transactionsRepo.createTransaction;
 export const checkPaymentExists = transactionsRepo.checkPaymentExists;
+export const createManyTransactions = transactionsRepo.createManyTransactions;
 export const getSummary = transactionsRepo.getSummary;
 
 export const addPendingPayment = pendingPaymentsRepo.addPendingPayment;
@@ -19,22 +20,18 @@ export const markPaymentFailed = pendingPaymentsRepo.markPaymentFailed;
 
 export async function purgeAllPayments() {
   try {
+    // Prioriza a limpeza do Redis. Se falhar, a operação inteira falha.
+    await redis.flushAll();
+    
+    // Prossegue com a limpeza do banco de dados apenas se o Redis for limpo com sucesso.
     await Promise.all([
-      transactionsRepo.purgeTransactions(), // This now clears Redis counters too
+      transactionsRepo.purgeTransactions(),
       pendingPaymentsRepo.purgePendingPayments(),
-      redis.flushAll()
     ]);
   } catch (error) {
-    console.warn('Full purge failed, trying database only:', error);
-    try {
-      await Promise.all([
-        transactionsRepo.purgeTransactions(),
-        pendingPaymentsRepo.purgePendingPayments()
-      ]);
-    } catch (dbError) {
-      console.error('Database purge failed:', dbError);
-      throw dbError;
-    }
+    console.error('Purge operation failed:', error);
+    // Lança o erro para garantir que o chamador saiba que a operação falhou.
+    throw new Error('Failed to purge all payments and cache.');
   }
 }
 

@@ -111,5 +111,5 @@ export function startHealthCheck() {
     // Immediate check on startup
     checkHealth();
     // Check every 3 seconds instead of 2 (closer to 5s rate limit)
-    setInterval(checkHealth, 3000);
+    setInterval(checkHealth, 5000);
 }
