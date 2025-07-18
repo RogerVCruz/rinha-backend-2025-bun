@@ -1,5 +1,5 @@
 import { Elysia, t } from 'elysia';
-import { createPayment, getPaymentsSummary, purgePayments } from '../controllers/payments.controller';
+import { createPayment, getPaymentsSummary, purgePayments, rebuildSummaryCache } from '../controllers/payments.controller';
 
 export const payments = new Elysia()
   .get("/payments-summary", getPaymentsSummary, {
@@ -14,4 +14,5 @@ export const payments = new Elysia()
         amount: t.Number(),
     })
   })
-  .post("/purge-payments", purgePayments);
+  .post("/purge-payments", purgePayments)
+  .post("/rebuild-summary-cache", rebuildSummaryCache);

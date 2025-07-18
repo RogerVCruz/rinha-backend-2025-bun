@@ -7,8 +7,8 @@ interface HealthStatus {
 }
 
 let healthCache: HealthStatus = {
-  default: { isFailing: true, minResponseTime: 0 },
-  fallback: { isFailing: true, minResponseTime: 0 }
+  default: { isFailing: false, minResponseTime: 100 },
+  fallback: { isFailing: false, minResponseTime: 100 }
 };
 
 export function getHealthStatusSync(): HealthStatus {

@@ -2,6 +2,7 @@ import redis from '../infra/redis';
 
 export class CacheService {
   private static readonly SUMMARY_TTL = 30;
+  private static readonly FILTERED_SUMMARY_TTL = 5; // Shorter TTL for date-filtered queries
 
   static getSummaryKey(from?: string, to?: string): string {
     return `summary:${from || 'all'}:${to || 'all'}`;
@@ -21,7 +22,8 @@ export class CacheService {
   static async setSummary(data: any[], from?: string, to?: string): Promise<void> {
     try {
       const key = this.getSummaryKey(from, to);
-      await redis.set(key, JSON.stringify(data), { EX: this.SUMMARY_TTL });
+      const ttl = (from && to) ? this.FILTERED_SUMMARY_TTL : this.SUMMARY_TTL;
+      await redis.set(key, JSON.stringify(data), { EX: ttl });
     } catch (error) {
       console.warn('Cache write failed for summary:', error);
     }

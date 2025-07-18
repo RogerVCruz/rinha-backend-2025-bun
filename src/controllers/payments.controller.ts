@@ -39,30 +39,53 @@ export const getPaymentsSummary = async ({
 }: {
   query: { from?: string; to?: string };
 }) => {
-  const result = await paymentsRepository.getSummary(query.from, query.to);
+  // Add timeout for database operations
+  const timeoutPromise = new Promise((_, reject) => {
+    setTimeout(() => reject(new Error('Summary query timeout')), 3000); // 3 second timeout
+  });
 
-  const summary = {
-    default: {
-      totalRequests: 0,
-      totalAmount: 0,
-    },
-    fallback: {
-      totalRequests: 0,
-      totalAmount: 0,
-    },
-  };
+  try {
+    const result = await Promise.race([
+      paymentsRepository.getSummary(query.from, query.to),
+      timeoutPromise
+    ]) as any[];
 
-  for (const row of result) {
-    const processor = row.processor;
-    if (processor === "default" || processor === "fallback") {
-      summary[processor as "default" | "fallback"] = {
-        totalRequests: Number(row.total_requests),
-        totalAmount: Number(row.total_amount),
-      };
+    const summary = {
+      default: {
+        totalRequests: 0,
+        totalAmount: 0,
+      },
+      fallback: {
+        totalRequests: 0,
+        totalAmount: 0,
+      },
+    };
+
+    for (const row of result) {
+      const processor = row.processor;
+      if (processor === "default" || processor === "fallback") {
+        summary[processor as "default" | "fallback"] = {
+          totalRequests: Number(row.total_requests),
+          totalAmount: Number(row.total_amount),
+        };
+      }
     }
-  }
 
-  return summary;
+    return summary;
+  } catch (error) {
+    console.error('Summary query failed:', error);
+    // Return default values on timeout/error
+    return {
+      default: {
+        totalRequests: 0,
+        totalAmount: 0,
+      },
+      fallback: {
+        totalRequests: 0,
+        totalAmount: 0,
+      },
+    };
+  }
 };
 
 
@@ -118,4 +141,9 @@ export const purgePayments = async () => {
     redisQueue.purgeAllQueues()
   ]);
   return { message: "All payments purged successfully" };
+};
+
+export const rebuildSummaryCache = async () => {
+  await paymentsRepository.rebuildSummaryCache();
+  return { message: "Summary cache rebuilt successfully" };
 };

@@ -2,6 +2,7 @@ import redis from '../infra/redis';
 import * as transactionsRepo from './transactions.repository';
 import * as pendingPaymentsRepo from './pending-payments.repository';
 import * as healthRepo from './health.repository';
+import { RedisSummaryService } from '../services/redis-summary.service';
 
 // Re-export for backward compatibility
 export const getHealthStatus = healthRepo.getHealthStatus;
@@ -19,7 +20,7 @@ export const markPaymentFailed = pendingPaymentsRepo.markPaymentFailed;
 export async function purgeAllPayments() {
   try {
     await Promise.all([
-      transactionsRepo.purgeTransactions(),
+      transactionsRepo.purgeTransactions(), // This now clears Redis counters too
       pendingPaymentsRepo.purgePendingPayments(),
       redis.flushAll()
     ]);
@@ -35,4 +36,9 @@ export async function purgeAllPayments() {
       throw dbError;
     }
   }
+}
+
+// Add helper function to rebuild Redis summary from DB
+export async function rebuildSummaryCache() {
+  await RedisSummaryService.rebuildFromDatabase();
 }
