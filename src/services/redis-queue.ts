@@ -1,16 +1,44 @@
 import redis from '../infra/redis';
 
-interface QueueItem {
+// Interface para o item da fila
+export interface QueueItem {
   correlationId: string;
   amount: number;
   retryCount: number;
   nextRetryAt: number;
 }
 
+// Interface para o retorno das funções que pegam itens, incluindo o item bruto
+export interface DequeuedItem {
+  raw: string;
+  parsed: QueueItem;
+}
+
+// Chaves do Redis
 const QUEUE_KEY = 'payment_queue';
 const RETRY_QUEUE_KEY = 'payment_retry_queue';
-const PROCESSING_KEY = 'payment_processing';
+const PROCESSING_KEY = 'payment_processing'; // Fila para itens em processamento
 
+/**
+ * Script Lua para atomicamente pegar e remover itens da fila de retry (Sorted Set).
+ * Argumentos (ARGV):
+ * - ARGV[1]: Timestamp atual (Date.now()) para buscar itens com score menor ou igual.
+ * Retorna:
+ * - Uma lista de itens que estavam prontos para serem reprocessados.
+ */
+const GET_AND_REMOVE_RETRY_ITEMS_SCRIPT = `
+  local items = redis.call('ZRANGEBYSCORE', KEYS[1], 0, ARGV[1])
+  if #items > 0 then
+    redis.call('ZREMRANGEBYSCORE', KEYS[1], 0, ARGV[1])
+  end
+  return items
+`;
+
+
+/**
+ * Adiciona um novo pagamento à fila principal.
+ * Usa um set com NX para garantir que o mesmo correlationId não seja enfileirado duas vezes.
+ */
 export async function addToQueue(correlationId: string, amount: number): Promise<void> {
   const item: QueueItem = {
     correlationId,
@@ -20,6 +48,7 @@ export async function addToQueue(correlationId: string, amount: number): Promise
   };
   
   try {
+    // Garante a idempotência na adição à fila
     const added = await redis.set(`queue_item:${correlationId}`, '1', { NX: true, EX: 3600 });
     if (added === 'OK') {
       await redis.lPush(QUEUE_KEY, JSON.stringify(item));
@@ -30,29 +59,29 @@ export async function addToQueue(correlationId: string, amount: number): Promise
   }
 }
 
-export async function getFromQueue(limit = 20): Promise<QueueItem[]> {
+/**
+ * Pega itens da fila principal de forma segura, movendo-os para uma fila de processamento.
+ * Isso previne a perda de dados se o worker falhar.
+ */
+export async function getFromQueue(limit = 20): Promise<DequeuedItem[]> {
   try {
-    const pipeline = redis.multi();
-    
+    const items: DequeuedItem[] = [];
     for (let i = 0; i < limit; i++) {
-      pipeline.rPop(QUEUE_KEY);
-    }
-    
-    const results = await pipeline.exec();
-    const items: QueueItem[] = [];
-    
-    if (results && Array.isArray(results)) {
-      for (const result of results) {
-        if (result && Array.isArray(result) && result[1]) {
-          try {
-            items.push(JSON.parse(result[1] as string));
-          } catch (parseError) {
-            console.warn('Failed to parse queue item:', parseError);
-          }
+      // LMOVE move atomicamente o item da fila principal para a de processamento
+      const rawItem = await redis.lMove(QUEUE_KEY, PROCESSING_KEY, 'RIGHT', 'LEFT');
+      if (rawItem) {
+        try {
+          items.push({ raw: rawItem, parsed: JSON.parse(rawItem) });
+        } catch (parseError) {
+          console.warn('Failed to parse queue item, returning to queue:', rawItem, parseError);
+          // Se o item for inválido, devolve para o final da fila de processamento para análise manual
+          await redis.lPush(PROCESSING_KEY, rawItem);
         }
+      } else {
+        // A fila está vazia
+        break;
       }
     }
-    
     return items;
   } catch (error) {
     console.error('Failed to get from queue:', error);
@@ -60,22 +89,23 @@ export async function getFromQueue(limit = 20): Promise<QueueItem[]> {
   }
 }
 
-export async function getRetryableItems(): Promise<QueueItem[]> {
+/**
+ * Pega itens da fila de retry de forma atômica usando um script Lua.
+ */
+export async function getRetryableItems(): Promise<DequeuedItem[]> {
   try {
     const now = Date.now();
-    const items = await redis.zRangeByScore(RETRY_QUEUE_KEY, 0, now);
-    
-    if (items.length > 0) {
-      await redis.zRemRangeByScore(RETRY_QUEUE_KEY, 0, now);
-      
-      return items.map(item => {
-        try {
-          return JSON.parse(item);
-        } catch (error) {
-          console.warn('Failed to parse retry item:', error);
-          return null;
-        }
-      }).filter(Boolean) as QueueItem[];
+    // EVAL executa o script Lua de forma atômica
+    const rawItems = await redis.eval(GET_AND_REMOVE_RETRY_ITEMS_SCRIPT, {
+      keys: [RETRY_QUEUE_KEY],
+      arguments: [String(now)],
+    }) as string[];
+
+    if (rawItems && rawItems.length > 0) {
+      // Move os itens recuperados para a fila de processamento
+      await redis.lPush(PROCESSING_KEY, rawItems);
+
+      return rawItems.map(raw => ({ raw, parsed: JSON.parse(raw) }));
     }
     
     return [];
@@ -85,72 +115,79 @@ export async function getRetryableItems(): Promise<QueueItem[]> {
   }
 }
 
-export async function markAsProcessed(correlationId: string): Promise<void> {
+/**
+ * Marca um pagamento como totalmente processado.
+ * Remove o item da fila de processamento e a chave de controle de duplicidade.
+ * @param correlationId - O ID de correlação do pagamento.
+ * @param rawItem - O item stringificado original para remover da lista de processamento.
+ */
+export async function markAsProcessed(correlationId: string, rawItem: string): Promise<void> {
   try {
-    await Promise.all([
-      redis.del(`queue_item:${correlationId}`),
-      redis.set(`payment:${correlationId}`, '1', { EX: 3600 })
-    ]);
+    const pipeline = redis.multi();
+    // Remove o item da lista de processamento
+    pipeline.lRem(PROCESSING_KEY, 1, rawItem);
+    // Remove a chave que previne a re-inserção na fila
+    pipeline.del(`queue_item:${correlationId}`);
+    // Opcional: Marca como processado para consultas futuras
+    pipeline.set(`payment_processed:${correlationId}`, '1', { EX: 3600 });
+    
+    await pipeline.exec();
   } catch (error) {
-    console.error('Failed to mark as processed:', error);
+    console.error(`Failed to mark as processed for ${correlationId}:`, error);
   }
 }
 
-export async function addToRetryQueue(correlationId: string, amount: number, retryCount: number): Promise<void> {
+/**
+ * Adiciona um item à fila de retentativas (Sorted Set) com backoff exponencial.
+ * @param rawItem - O item stringificado original para remover da lista de processamento.
+ */
+export async function addToRetryQueue(rawItem: string): Promise<void> {
   try {
+    const item: QueueItem = JSON.parse(rawItem);
     const maxRetries = 10;
     
-    if (retryCount >= maxRetries) {
-      await redis.del(`queue_item:${correlationId}`);
-      await redis.set(`payment_failed:${correlationId}`, '1', { EX: 86400 }); // 24h
+    // Primeiro, remove da fila de processamento
+    await redis.lRem(PROCESSING_KEY, 1, rawItem);
+
+    if (item.retryCount >= maxRetries) {
+      console.warn(`Payment ${item.correlationId} reached max retries.`);
+      await redis.del(`queue_item:${item.correlationId}`);
+      await redis.set(`payment_failed:${item.correlationId}`, '1', { EX: 86400 }); // 24h
       return;
     }
     
-    const delay = Math.min(300, Math.pow(2, retryCount) * 5) * 1000;
+    // Calcula o delay com backoff exponencial (5ms, 10ms, 20ms, 40ms...) com teto de 300s
+    const delay = Math.min(300, Math.pow(2, item.retryCount) * 5) * 1000;
     const nextRetryAt = Date.now() + delay;
     
-    const item: QueueItem = {
-      correlationId,
-      amount,
-      retryCount: retryCount + 1,
+    const newItem: QueueItem = {
+      ...item,
+      retryCount: item.retryCount + 1,
       nextRetryAt
     };
     
-    await redis.zAdd(RETRY_QUEUE_KEY, { score: nextRetryAt, value: JSON.stringify(item) });
+    await redis.zAdd(RETRY_QUEUE_KEY, { score: nextRetryAt, value: JSON.stringify(newItem) });
   } catch (error) {
     console.error('Failed to add to retry queue:', error);
   }
 }
 
-export async function getAllItems(): Promise<QueueItem[]> {
-  try {
-    const [mainQueue, retryQueue] = await Promise.all([
-      getFromQueue(1000),
-      getRetryableItems()
-    ]);
-    
-    return [...mainQueue, ...retryQueue];
-  } catch (error) {
-    console.error('Failed to get all items:', error);
-    return [];
-  }
-}
-
+/**
+ * Limpa todas as filas e chaves relacionadas. Apenas para testes.
+ * CUIDADO: O uso de KEYS não é recomendado em produção.
+ */
 export async function purgeAllQueues(): Promise<void> {
   try {
-    const pipeline = redis.multi();
-    
     const keys = await redis.keys('queue_item:*');
-    const paymentKeys = await redis.keys('payment:*');
-    const failedKeys = await redis.keys('payment_failed:*');
+    const paymentKeys = await redis.keys('payment_*:*');
 
-    pipeline.del(QUEUE_KEY);
-    pipeline.del(RETRY_QUEUE_KEY);
-    pipeline.del(PROCESSING_KEY);
+    const pipeline = redis.multi()
+      .del(QUEUE_KEY)
+      .del(RETRY_QUEUE_KEY)
+      .del(PROCESSING_KEY);
     
     if (keys.length > 0) pipeline.del(keys);
     if (paymentKeys.length > 0) pipeline.del(paymentKeys);
-    if (failedKeys.length > 0) pipeline.del(failedKeys);
     
     await pipeline.exec();
   } catch (error) {

@@ -15,7 +15,7 @@ services:
       resources:
         limits:
           cpus: "0.35"
-          memory: "180MB"  # +65MB (era 115MB) - CRÍTICO para evitar OOM
+          memory: "160MB"  # +65MB (era 115MB) - CRÍTICO para evitar OOM
     networks:
       - rinha-net
     healthcheck:
@@ -32,7 +32,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.08"
+          cpus: "0.05"
           memory: "20MB"   # -43MB (estava subutilizado - 2.07MB usado)
     networks:
       - rinha-net
@@ -45,6 +45,7 @@ services:
   api1: &api
     build: .
     hostname: api1
+    command: bun --smol run src/index.ts
     depends_on:
       db:
         condition: service_healthy
@@ -54,8 +55,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.465"
-          memory: "70MB"   # -5MB cada (era 75MB) - Mais conservador
+          cpus: "0.46"
+          memory: "75MB"
     networks:
       - rinha-net
       - payment-processor
